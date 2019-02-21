@@ -81,3 +81,5 @@ experiments/landsat/data
 experiments/landsat/tmp
 experiments/large_data/data
 experiments/large_data/tmp
+experiments/small_data/results*
+skutil*

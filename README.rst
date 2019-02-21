@@ -50,3 +50,5 @@ Disclaimer
 
 The source code is published under the GNU General Public License (GPLv3). The authors are not responsible for any implications that stem from the use of this software.
 
+This version of woody has been edited to use GPU in the inference phase as part of the bachelor project for student at University of Copenhagen
+
