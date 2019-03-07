@@ -1,14 +1,31 @@
-
 import os
 import gc
 import numpy
+
+
 from scipy.stats import mode
 
 from woody.io import DiskStore
 from woody.util import perform_task_in_parallel
 from .util import distribute_patterns
 from .util import _load_single_tree
-        
+
+#Cuda stuff - for testing cuda still works
+import pycuda.autoinit
+import pycuda.driver as drv
+import numpy
+
+from pycuda.compiler import SourceModule
+mod = SourceModule("""
+__global__ void predict_bottom_gpu(float *dest, float *a, float *b)
+{
+  const int i = threadIdx.x;
+  dest[i] = a[i] * b[i];
+}
+""")
+predict_bottom_gpu = mod.get_function("predict_bottom_gpu")
+#end cuda stuff
+
 def predict_array(X, n_estimators, n_estimators_bottom, numpy_dtype_float, odir, store, wrapped_instance, n_jobs):
     """ Returns predictions for a given set of patterns.
     """
@@ -16,7 +33,6 @@ def predict_array(X, n_estimators, n_estimators_bottom, numpy_dtype_float, odir,
     params_parallel = []
     
     for b in xrange(n_estimators):
-
         odir_local = os.path.join(odir, str(int(b)))
         fname = os.path.join(odir_local, "toptree.tree")
         toptree = _load_single_tree(store, fname, wrapped_instance, typ="top")
@@ -27,6 +43,7 @@ def predict_array(X, n_estimators, n_estimators_bottom, numpy_dtype_float, odir,
         results = perform_task_in_parallel(predict_bottom, params_parallel, n_jobs=n_jobs, backend="multiprocessing")
     else:
         results = []
+        #TODO: Change memory-store to use GPU
         for param in params_parallel:
             res = predict_bottom(param)
             results.append(res)    
