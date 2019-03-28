@@ -12,7 +12,14 @@ import cPickle as pickle
 from .util import PickableWoodyRFWrapper, ensure_data_types
 from woody.util.array import transpose_array
 from woody.util import draw_single_tree
-            
+
+#Cuda stuff - for testing cuda still works
+import pycuda.autoinit
+import pycuda.driver as drv
+import numpy
+from pycuda.compiler import SourceModule
+
+
 class Wood(object):
     """
     Random forest implementation.
@@ -250,7 +257,6 @@ class Wood(object):
     def predict_all(self, X, indices=None):
         """
         """
-        
         if X.dtype != self.numpy_dtype_float:
             X = X.astype(self.numpy_dtype_float)      
         
@@ -266,6 +272,44 @@ class Wood(object):
         self.wrapper.module.predict_all_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
 
         return preds
+    
+        #For predicting with pyCuda
+    def predict_all_cuda(self, X, indices=None):
+        if X.dtype != self.numpy_dtype_float:
+            X = X.astype(self.numpy_dtype_float)      
+        
+        if indices is None: 
+            indices = np.empty((0, 0), dtype=np.int32)
+        else:
+            indices = np.array(indices).astype(dtype=np.int32)
+            if indices.ndim == 1:
+                indices = indices.reshape((1, len(indices)))              
+        preds = np.ones((X.shape[0], self.n_estimators), dtype=self.numpy_dtype_float)
+
+        #do stuff please
+        #self.wrapper.module.predict_all_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
+        #use cuda_predict_all_extern instead -- needs to be defined
+
+        return preds
+    
+    #dont needs params and forest as this is still in the .py file???
+    def cuda_query_forest(X, preds, indices): 
+        #call cuda_query_tree
+        a = os.getcwd()
+        typePath = a + "/src/tree/include"
+        mod = SourceModule("""
+        #include "types.h"
+        extern "C"{
+            __global__ void cuda_predict(float *dest, float *a, float *b)
+            {
+                const int i = threadIdx.x;
+                dest[i] = a[i] * b[i];
+            }
+        }
+        """,no_extern_c=True,include_dirs=[typePath])
+        cuda_predict = mod.get_function("cuda_predict")
+    
+
 
     def get_leaves_ids(self, X, n_jobs=1, indices=None, verbose=0):
         
