@@ -17,6 +17,7 @@ from woody.util import draw_single_tree
 import pycuda.autoinit
 import pycuda.driver as drv
 from pycuda.compiler import SourceModule
+from scipy.stats import mode
 
 class Wood(object):
     """
@@ -294,19 +295,24 @@ class Wood(object):
         """)
         cuda_predict = mod.get_function("cuda_query_tree")
 
-        preds = np.ones(X.shape[0], dtype=np.float32)
-        dimensions = np.array([X.shape[0],X.shape[1]], dtype=np.int32)
+        all_preds = []#np.ones((X.shape[0],self.n_estimators), dtype=np.float32)
+        for i in xrange (self.n_estimators):
+            preds = np.ones(X.shape[0], dtype=np.float32)
+            dimensions = np.array([X.shape[0],X.shape[1]], dtype=np.int32)
+            left_ids, right_ids, features, thres_or_leaf, leaf_criterion = self.tree_as_arrays(i)
+            nr_grids = int(float(X.shape[0])/1024.0+1)
+            X_1D = np.array(X.ravel(),dtype=np.int32)
+            max_threads = 1024
+            cuda_predict(drv.Out(preds), drv.In(left_ids), drv.In(right_ids), drv.In(features), drv.In(thres_or_leaf),
+            drv.In(X_1D), drv.In(dimensions),block=(max_threads,1,1), grid=(nr_grids,1))
+            all_preds.append(np.array(preds,np.int32))  
+        all_preds = np.array(all_preds,np.int32)
+        combined_preds = mode(all_preds)[0][0]
+        return combined_preds
 
+    
 
-        left_ids, right_ids, features, thres_or_leaf, leaf_criterion = self.tree_as_arrays(0)
-        nr_grids = int(float(X.shape[0])/1024.0+1)
-        X_1D = np.array(X.ravel(),dtype=np.int32)
-        max_threads = 1024
-        cuda_predict(drv.Out(preds), drv.In(left_ids), drv.In(right_ids), drv.In(features), drv.In(thres_or_leaf),
-        drv.In(X_1D), drv.In(dimensions),block=(max_threads,1,1), grid=(nr_grids,1))
-        preds = np.array(preds,np.int32)
-        return preds
-
+    #sanity check that all attributes work correctly
     def python_predict(self,left_ids, right_ids, features, thres_or_leaf, leaf_criterion, Xtest, dims):
         preds = np.zeros(dims[0],np.int32)
         for i in xrange (dims[0]):
