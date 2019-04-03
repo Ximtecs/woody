@@ -97,7 +97,7 @@ typedef struct tree_node {
 	unsigned int left_id;
 	unsigned int right_id;
 	unsigned int feature;
-	FLOAT_TYPE thres_or_leaf;
+	float thres_or_leaf;
 	unsigned int leaf_criterion;
 
 } TREE_NODE;

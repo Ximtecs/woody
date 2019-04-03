@@ -16,9 +16,7 @@ from woody.util import draw_single_tree
 #Cuda stuff - for testing cuda still works
 import pycuda.autoinit
 import pycuda.driver as drv
-import numpy
 from pycuda.compiler import SourceModule
-
 
 class Wood(object):
     """
@@ -272,43 +270,84 @@ class Wood(object):
         self.wrapper.module.predict_all_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
 
         return preds
-    
-        #For predicting with pyCuda
-    def predict_all_cuda(self, X, indices=None):
-        if X.dtype != self.numpy_dtype_float:
-            X = X.astype(self.numpy_dtype_float)      
-        
-        if indices is None: 
-            indices = np.empty((0, 0), dtype=np.int32)
-        else:
-            indices = np.array(indices).astype(dtype=np.int32)
-            if indices.ndim == 1:
-                indices = indices.reshape((1, len(indices)))              
-        preds = np.ones((X.shape[0], self.n_estimators), dtype=self.numpy_dtype_float)
 
-        #do stuff please
-        #self.wrapper.module.predict_all_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
-        #use cuda_predict_all_extern instead -- needs to be defined
 
-        return preds
-    
-    #dont needs params and forest as this is still in the .py file???
-    def cuda_query_forest(X, preds, indices): 
-        #call cuda_query_tree
-        a = os.getcwd()
-        typePath = a + "/src/tree/include"
+    def cuda_predict(self, X):
         mod = SourceModule("""
-        #include "types.h"
-        extern "C"{
-            __global__ void cuda_predict(float *dest, float *a, float *b)
-            {
-                const int i = threadIdx.x;
-                dest[i] = a[i] * b[i];
+        __global__ void cuda_query_tree(float *predictions, 
+            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* dims)
+        {
+            register unsigned int i, node_id;
+            i = threadIdx.x + blockDim.x * blockIdx.x;             
+            node_id = 0;
+            if (i < dims[0]){
+                while (left_ids[node_id] != 0) {
+                    if (Xtest[dims[1]*i+features[node_id]] <= thres_or_leaf[node_id]) {
+                        node_id = left_ids[node_id];
+                    } else {
+                        node_id = right_ids[node_id];
+                    }
+                }
+                predictions[i] = thres_or_leaf[node_id];
             }
         }
-        """,no_extern_c=True,include_dirs=[typePath])
-        cuda_predict = mod.get_function("cuda_predict")
-    
+        """)
+        cuda_predict = mod.get_function("cuda_query_tree")
+
+        preds = np.ones(X.shape[0], dtype=np.float32)
+        dimensions = np.array([X.shape[0],X.shape[1]], dtype=np.int32)
+
+
+        left_ids, right_ids, features, thres_or_leaf, leaf_criterion = self.tree_as_arrays(0)
+        nr_grids = int(float(X.shape[0])/1024.0+1)
+        X_1D = np.array(X.ravel(),dtype=np.int32)
+        max_threads = 1024
+        cuda_predict(drv.Out(preds), drv.In(left_ids), drv.In(right_ids), drv.In(features), drv.In(thres_or_leaf),
+        drv.In(X_1D), drv.In(dimensions),block=(max_threads,1,1), grid=(nr_grids,1))
+        preds = np.array(preds,np.int32)
+        return preds
+
+    def python_predict(self,left_ids, right_ids, features, thres_or_leaf, leaf_criterion, Xtest, dims):
+        preds = np.zeros(dims[0],np.int32)
+        for i in xrange (dims[0]):
+            node_id = 0
+            while (left_ids[node_id] != 0):
+                if i == 1:
+                    print("Xval is: " + str(Xtest[dims[1]*i+features[node_id]]))
+                    print("thres_or_leaf is: " + str(thres_or_leaf[node_id]))
+                    print("node_id is: " + str(node_id))
+                    print("left_ids is: " + str(left_ids[node_id]))
+                    print("right_ids is: " + str(right_ids[node_id]))
+                    print("feature is: " + str(features[node_id]))
+                    print("")
+                if Xtest[dims[1]*i+features[node_id]] <= thres_or_leaf[node_id]:
+                    node_id = left_ids[node_id]
+                else:
+                    node_id = right_ids[node_id]
+            preds[i] = thres_or_leaf[node_id]
+        return preds
+
+    def tree_as_arrays(self,index):
+        tree = self.get_wrapped_tree(index)
+        n_nodes = tree.node_counter
+        nodes = []
+        for i in xrange(n_nodes):
+            node = self.wrapper.module.TREE_NODE()
+            self.wrapper.module.get_tree_node_extern(tree, i, node)
+            nodes.append(node)
+        left_ids = np.zeros(n_nodes, dtype=np.int32)
+        right_ids = np.zeros(n_nodes, dtype=np.int32)
+        features = np.zeros(n_nodes, dtype=np.int32)
+        thres_or_leaf = np.ones(n_nodes, dtype=np.float32)
+        leaf_criterion = np.zeros(n_nodes, dtype=np.int32)
+        for i in range(n_nodes):
+            left_ids[i] = nodes[i].left_id
+            right_ids[i] = nodes[i].right_id
+            features[i] = nodes[i].feature
+            thres_or_leaf[i] = nodes[i].thres_or_leaf
+            leaf_criterion[i] = nodes[i].leaf_criterion
+        return left_ids, right_ids, features, thres_or_leaf, leaf_criterion
+
 
 
     def get_leaves_ids(self, X, n_jobs=1, indices=None, verbose=0):
