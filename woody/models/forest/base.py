@@ -19,6 +19,7 @@ import pycuda.driver as drv
 from pycuda.compiler import SourceModule
 from scipy.stats import mode
 import time
+import string
 
 class Wood(object):
     """
@@ -250,7 +251,10 @@ class Wood(object):
                 
         preds = np.ones(X.shape[0], dtype=self.numpy_dtype_float)
         
+        cpu_start = time.time()
         self.wrapper.module.predict_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
+        cpu_end = time.time()
+        print("cpu time:\t\t%f" % (cpu_end - cpu_start))
 
         return preds
 
@@ -318,47 +322,63 @@ class Wood(object):
 
     #this function has a cuda kernel were each thread predicts for a single instance on all trees
     def cuda_pred_forest(self,X):
-        mod = SourceModule("""
+        mod = """
+        #define X_dim0 $X_dim0
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
         __global__ void cuda_query_forest(float *predictions, 
             int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* params, int* displacements)
         {
             register unsigned int i, node_id;
             i = threadIdx.x + blockDim.x * blockIdx.x;
+
+            //making local copy of instance improves performance
+            int X_local[X_dim1]; //Should be params[1] but i get an error???
+            for(int k = 0; k < X_dim1; k++){
+                X_local[k] = Xtest[X_dim1*i+k];
+            }
+
+
           
-            for(int j = 0; j < params[2]; j++){
-                
+            for(int j = 0; j < N_estimators; j++){                
                 node_id = 0 + displacements[j];
-                if (i < params[0]){
+                if (i < X_dim0){
                     while (left_ids[node_id] != 0) {
-                        if (Xtest[params[1]*i+features[node_id]]<= thres_or_leaf[node_id]) {
+                        if (X_local[features[node_id]]<= thres_or_leaf[node_id]) {
                             node_id = left_ids[node_id] + displacements[j];
                         } else {
                             node_id = right_ids[node_id] + displacements[j];
                         }
                     }
-                predictions[j*params[0]+i] = thres_or_leaf[node_id];
+                predictions[j*X_dim0+i] = thres_or_leaf[node_id];
                 }
             }
         }
-        """)
-        cuda_pred_forest = mod.get_function("cuda_query_forest")
+        """
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim0 = X.shape[0], X_dim1 = X.shape[1], N_estimators = self.n_estimators)
+        module = SourceModule(code)
+        cuda_pred_forest = module.get_function("cuda_query_forest")
 
-        get_forest_start = time.time()
-        left_ids, right_ids, features, thres_or_leaf, leaf_criterion, total_nodes = self.forest_as_array()
+
+        if X.dtype != np.int32:
+            X = X.astype(np.int32) 
+        #cuda_pred_forest = mod.get_function("cuda_query_forest")
+        #get_forest_start = time.time()
+        left_ids, right_ids, features, thres_or_leaf, total_nodes = self.forest_as_array()
         #print(total_nodes)
-        get_forest_end = time.time()
-        print("get forest time:      %f" % (get_forest_end - get_forest_start))
+        #get_forest_end = time.time()
+        #print("get forest time:\t\t%f" % (get_forest_end - get_forest_start))
 
         preds = np.ones(X.shape[0]*self.n_estimators, dtype=np.float32)
         params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
-        X_1D = np.array(X.ravel(),dtype=np.int32)
-        nr_grids = int(float(X.shape[0])/1024.0+1)
         max_threads = 1024
+        nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         cuda_start = time.time()
         cuda_pred_forest(drv.Out(preds), drv.In(left_ids), drv.In(right_ids), drv.In(features), drv.In(thres_or_leaf),
-            drv.In(X_1D), drv.In(params), drv.In(total_nodes),block=(max_threads,1,1), grid=(nr_grids,1))
+            drv.In(X), drv.In(params), drv.In(total_nodes),block=(max_threads,1,1), grid=(nr_grids,1))
         cuda_end = time.time()
-        print("cuda time:      %f" % (cuda_end - cuda_start))
+        print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
         preds = np.reshape(np.array(preds,np.int32),(-1,X.shape[0]))
         combined_preds = mode(preds)[0][0]
         return combined_preds
@@ -388,32 +408,36 @@ class Wood(object):
 
     def forest_as_array(self):
         tree_nodes_counter = np.zeros(self.n_estimators,np.int32)
-        tree_nodes_sum= np.zeros(self.n_estimators,np.int32)
+        tree_nodes_sum = np.zeros(self.n_estimators,np.int32)
         for i in xrange (self.n_estimators):
             tree = self.get_wrapped_tree(i)
             tree_nodes_counter[i] = tree.node_counter
             tree_nodes_sum[i] = np.sum(tree_nodes_counter[:i])
         total_nodes = np.sum(tree_nodes_counter)
-        #print(total_nodes)
         left_ids = np.zeros(total_nodes, dtype=np.int32)
         right_ids = np.zeros(total_nodes, dtype=np.int32)
         features = np.zeros(total_nodes, dtype=np.int32)
         thres_or_leaf = np.ones(total_nodes, dtype=np.float32)
-        leaf_criterion = np.zeros(total_nodes, dtype=np.int32)
+        
         tree = self.wrapper.module.TREE()
         node = self.wrapper.module.TREE_NODE()
+        index = 0 
         for i in xrange (self.n_estimators):
             displacement = np.sum(tree_nodes_counter[:i])
             #print(displacement)
             tree = self.get_wrapped_tree(i)
+            #test_start_time = time.time()
             for j in xrange (tree_nodes_counter[i]):
+                index = displacement+j
                 self.wrapper.module.get_tree_node_extern(tree, j, node)
-                left_ids[displacement+j] = node.left_id
-                right_ids[displacement+j] = node.right_id
-                features[displacement+j] = node.feature
-                thres_or_leaf[displacement+j] = node.thres_or_leaf
-                leaf_criterion[displacement+j] = node.leaf_criterion
-        return left_ids, right_ids, features, thres_or_leaf, leaf_criterion, tree_nodes_sum
+                left_ids[index] = node.left_id
+                right_ids[index] = node.right_id
+                features[index] = node.feature
+                thres_or_leaf[index] = node.thres_or_leaf
+            #test_end_time = time.time()
+            #print("Initiation time is %f:" % (test_end_time - test_start_time))
+       
+        return left_ids, right_ids, features, thres_or_leaf, tree_nodes_sum
             
 
 
