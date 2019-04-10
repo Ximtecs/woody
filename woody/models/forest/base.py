@@ -108,6 +108,8 @@ class Wood(object):
         self.numpy_dtype_int = np.int32
                         
         assert self.float_type in self.ALLOWED_FLOAT_TYPES
+
+        
         
     def __del__(self):
         """ Destructor taking care of freeing
@@ -257,10 +259,10 @@ class Wood(object):
                 
         preds = np.ones(X.shape[0], dtype=self.numpy_dtype_float)
         
-        cpu_start = time.time()
+        #cpu_start = time.time()
         self.wrapper.module.predict_extern(X, preds, indices, self.wrapper.params, self.wrapper.forest)
-        cpu_end = time.time()
-        print("cpu time:\t\t%f" % (cpu_end - cpu_start))
+        #cpu_end = time.time()
+        #print("cpu time:\t\t%f" % (cpu_end - cpu_start))
 
         return preds
 
@@ -329,17 +331,40 @@ class Wood(object):
     #this function has a cuda kernel were each thread predicts for a single instance on all trees
     def cuda_pred_forest(self,X):
         mod = """
+        #include <math.h>
         #define X_dim0 $X_dim0
         #define X_dim1 $X_dim1
         #define N_estimators $N_estimators
-        __global__ void cuda_query_forest(float *predictions, 
+
+        __device__ int max_class(int* preds, int thread_nr){
+            int counts[N_estimators]; //assumes more tree than classes?? how many classes are there?
+            for(int i = 0; i < N_estimators; i++){
+                counts[i] = 0;
+            }
+            for(int i = 0; i < N_estimators; i++){
+                int index = preds[i];
+                counts[index] += 1;
+            }
+            int max_class = 0;
+            int max_count = 0;
+            for(int i = 0; i < N_estimators; i++){
+                if(counts[i] > max_count){
+                    max_count = counts[i];
+                    max_class = i;
+                }
+            }
+            return max_class;
+        }
+
+        __global__ void cuda_query_forest(int *predictions,
             int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* params, int* displacements)
         {
             register unsigned int i, node_id;
             i = threadIdx.x + blockDim.x * blockIdx.x;
 
-            //making local copy of instance improves performance
-            int X_local[X_dim1]; //Should be params[1] but i get an error???
+            int pred_local[N_estimators];
+
+            int X_local[X_dim1];
             for(int k = 0; k < X_dim1; k++){
                 X_local[k] = Xtest[X_dim1*i+k];
             }
@@ -354,33 +379,37 @@ class Wood(object):
                             node_id = right_ids[node_id] + displacements[j];
                         }
                     }
-                predictions[j*X_dim0+i] = thres_or_leaf[node_id];
+                pred_local[j] = round(thres_or_leaf[node_id]);
                 }
+
             }
+            predictions[i] = max_class(pred_local,i);
         }
         """
+
+        start_time = time.time()
         mod = string.Template(mod)
         code = mod.substitute(X_dim0 = X.shape[0], X_dim1 = X.shape[1], N_estimators = self.n_estimators)
         module = SourceModule(code)
         cuda_pred_forest = module.get_function("cuda_query_forest")
+        end_time = time.time()
+        print("test time:\t\t%f\n" % (end_time - start_time))
 
 
         if X.dtype != np.int32:
             X = X.astype(np.int32) 
 
 
-        preds = np.ones(X.shape[0]*self.n_estimators, dtype=np.float32)
+        preds = np.ones(X.shape[0], dtype=np.int32)
         params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
         max_threads = 1024
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
-        cuda_start = time.time()
+        #cuda_start = time.time()
         cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
             drv.In(X), drv.In(params), drv.In(self.tree_nodes_sum),block=(max_threads,1,1), grid=(nr_grids,1))
-        cuda_end = time.time()
-        print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
-        preds = np.reshape(np.array(preds,np.int32),(-1,X.shape[0]))
-        combined_preds = mode(preds)[0][0]
-        return combined_preds
+        #cuda_end = time.time()
+        #print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
+        return preds
 
     def cuda_pred_forest_mult(self,X):
         mod = """
@@ -439,7 +468,10 @@ class Wood(object):
         print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
         preds = np.reshape(np.array(preds,np.int32),(-1,X.shape[0]))
         #print(preds)
+        start_time = time.time()
         combined_preds = mode(preds)[0][0]
+        end_time = time.time()
+        print("test time:\t\t%f\n" % (end_time - start_time))
         return combined_preds
 
 
