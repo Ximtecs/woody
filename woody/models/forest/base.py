@@ -73,6 +73,11 @@ class Wood(object):
                  lam_criterion = 0.0, 
                  n_jobs=1,                                  
                  verbose=1,
+                 left_ids=None,
+                 right_ids=None,
+                 features=None,
+                 thres_or_leafs=None,
+                 tree_nodes_sum=None,
                  ):
 
         self.seed = seed
@@ -93,7 +98,8 @@ class Wood(object):
         self.lam_criterion = lam_criterion
         self.n_jobs = n_jobs
         self.verbose = verbose
-                
+        
+
         # set numpy float and int dtypes
         if self.float_type == "float":
             self.numpy_dtype_float = np.float32
@@ -338,8 +344,6 @@ class Wood(object):
                 X_local[k] = Xtest[X_dim1*i+k];
             }
 
-
-          
             for(int j = 0; j < N_estimators; j++){                
                 node_id = 0 + displacements[j];
                 if (i < X_dim0){
@@ -363,23 +367,78 @@ class Wood(object):
 
         if X.dtype != np.int32:
             X = X.astype(np.int32) 
-        #cuda_pred_forest = mod.get_function("cuda_query_forest")
-        #get_forest_start = time.time()
-        left_ids, right_ids, features, thres_or_leaf, total_nodes = self.forest_as_array()
-        #print(total_nodes)
-        #get_forest_end = time.time()
-        #print("get forest time:\t\t%f" % (get_forest_end - get_forest_start))
+
 
         preds = np.ones(X.shape[0]*self.n_estimators, dtype=np.float32)
         params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
         max_threads = 1024
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         cuda_start = time.time()
-        cuda_pred_forest(drv.Out(preds), drv.In(left_ids), drv.In(right_ids), drv.In(features), drv.In(thres_or_leaf),
-            drv.In(X), drv.In(params), drv.In(total_nodes),block=(max_threads,1,1), grid=(nr_grids,1))
+        cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
+            drv.In(X), drv.In(params), drv.In(self.tree_nodes_sum),block=(max_threads,1,1), grid=(nr_grids,1))
         cuda_end = time.time()
         print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
         preds = np.reshape(np.array(preds,np.int32),(-1,X.shape[0]))
+        combined_preds = mode(preds)[0][0]
+        return combined_preds
+
+    def cuda_pred_forest_mult(self,X):
+        mod = """
+        #define X_dim0 $X_dim0
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
+        #define X_per_threads $X_per_threads
+        __global__ void cuda_query_forest(float *predictions, 
+            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* params, int* displacements)
+        {
+            register unsigned int i, node_id;
+            i = threadIdx.x + blockDim.x * blockIdx.x;
+            int X_local[X_dim1*X_per_threads];
+            for(int k = 0; k < X_dim1*X_per_threads; k++){
+                if(X_dim1*i*X_per_threads+k < X_dim0 * X_dim1){
+                    X_local[k] = Xtest[X_dim1*i*X_per_threads+k];
+                }
+            }
+
+            for(int k = 0; k < X_per_threads; k++){
+                if (i * X_per_threads + k < X_dim0){
+                    for(int j = 0; j < N_estimators; j++){                
+                        node_id = 0 + displacements[j];
+                        while (left_ids[node_id] != 0) {
+                            if (X_local[k*X_dim1 + features[node_id]]<= thres_or_leaf[node_id]) {
+                                node_id = left_ids[node_id] + displacements[j];
+                            } else {
+                                node_id = right_ids[node_id] + displacements[j];
+                            }
+                        }
+                        predictions[j*X_dim0+i*X_per_threads+k] = thres_or_leaf[node_id];
+
+                    }
+                }
+            }
+        }
+        """
+        X_per_threads = 1
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim0 = X.shape[0], X_dim1 = X.shape[1], N_estimators = self.n_estimators, X_per_threads = X_per_threads)
+        module = SourceModule(code)
+        cuda_pred_forest = module.get_function("cuda_query_forest")
+
+
+        if X.dtype != np.int32:
+            X = X.astype(np.int32) 
+
+        preds = np.ones(X.shape[0]*self.n_estimators, dtype=np.float32)
+        params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
+        max_threads = 1024
+        nr_grids = int(float(X.shape[0])/float(max_threads*X_per_threads)+1)
+        cuda_start = time.time()
+        cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
+            drv.In(X), drv.In(params), drv.In(self.tree_nodes_sum),block=(max_threads,1,1), grid=(nr_grids,1))
+        cuda_end = time.time()
+        print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
+        preds = np.reshape(np.array(preds,np.int32),(-1,X.shape[0]))
+        #print(preds)
         combined_preds = mode(preds)[0][0]
         return combined_preds
 
@@ -406,7 +465,7 @@ class Wood(object):
         return preds
 
 
-    def forest_as_array(self):
+    def store_numpy_forest(self):
         tree_nodes_counter = np.zeros(self.n_estimators,np.int32)
         tree_nodes_sum = np.zeros(self.n_estimators,np.int32)
         for i in xrange (self.n_estimators):
@@ -436,8 +495,11 @@ class Wood(object):
                 thres_or_leaf[index] = node.thres_or_leaf
             #test_end_time = time.time()
             #print("Initiation time is %f:" % (test_end_time - test_start_time))
-       
-        return left_ids, right_ids, features, thres_or_leaf, tree_nodes_sum
+        self.left_ids = left_ids
+        self.right_ids = right_ids
+        self.features = features
+        self.thres_or_leafs = thres_or_leaf
+        self.tree_nodes_sum = tree_nodes_sum
             
 
 
