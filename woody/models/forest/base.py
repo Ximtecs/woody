@@ -109,6 +109,9 @@ class Wood(object):
                         
         assert self.float_type in self.ALLOWED_FLOAT_TYPES
 
+
+    
+
         
         
     def __del__(self):
@@ -330,85 +333,17 @@ class Wood(object):
 
     #this function has a cuda kernel were each thread predicts for a single instance on all trees
     def cuda_pred_forest(self,X):
-        mod = """
-        #include <math.h>
-        #define X_dim0 $X_dim0
-        #define X_dim1 $X_dim1
-        #define N_estimators $N_estimators
-
-        __device__ int max_class(int* preds, int thread_nr){
-            int counts[N_estimators]; //assumes more tree than classes?? how many classes are there?
-            for(int i = 0; i < N_estimators; i++){
-                counts[i] = 0;
-            }
-            for(int i = 0; i < N_estimators; i++){
-                int index = preds[i];
-                counts[index] += 1;
-            }
-            int max_class = 0;
-            int max_count = 0;
-            for(int i = 0; i < N_estimators; i++){
-                if(counts[i] > max_count){
-                    max_count = counts[i];
-                    max_class = i;
-                }
-            }
-            return max_class;
-        }
-
-        __global__ void cuda_query_forest(int *predictions,
-            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* params, int* displacements)
-        {
-            register unsigned int i, node_id;
-            i = threadIdx.x + blockDim.x * blockIdx.x;
-
-            int pred_local[N_estimators];
-
-            int X_local[X_dim1];
-            for(int k = 0; k < X_dim1; k++){
-                X_local[k] = Xtest[X_dim1*i+k];
-            }
-
-            for(int j = 0; j < N_estimators; j++){                
-                node_id = 0 + displacements[j];
-                if (i < X_dim0){
-                    while (left_ids[node_id] != 0) {
-                        if (X_local[features[node_id]]<= thres_or_leaf[node_id]) {
-                            node_id = left_ids[node_id] + displacements[j];
-                        } else {
-                            node_id = right_ids[node_id] + displacements[j];
-                        }
-                    }
-                pred_local[j] = round(thres_or_leaf[node_id]);
-                }
-
-            }
-            predictions[i] = max_class(pred_local,i);
-        }
-        """
-
-        start_time = time.time()
-        mod = string.Template(mod)
-        code = mod.substitute(X_dim0 = X.shape[0], X_dim1 = X.shape[1], N_estimators = self.n_estimators)
-        module = SourceModule(code)
-        cuda_pred_forest = module.get_function("cuda_query_forest")
-        end_time = time.time()
-        print("test time:\t\t%f\n" % (end_time - start_time))
-
-
         if X.dtype != np.int32:
             X = X.astype(np.int32) 
-
-
         preds = np.ones(X.shape[0], dtype=np.int32)
-        params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
-        max_threads = 1024
+        #params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
+        max_threads = 1024 / 2
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
-        #cuda_start = time.time()
-        cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
-            drv.In(X), drv.In(params), drv.In(self.tree_nodes_sum),block=(max_threads,1,1), grid=(nr_grids,1))
-        #cuda_end = time.time()
-        #print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
+        cuda_start = time.time()
+        self.global_cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
+            drv.In(X), drv.In(self.tree_nodes_sum),block=(max_threads,1,1), grid=(nr_grids,1))
+        cuda_end = time.time()
+        print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
         return preds
 
     def cuda_pred_forest_mult(self,X):
@@ -724,3 +659,69 @@ class Wood(object):
         except Exception, e:
               
             raise Exception("Error while loading model from " + unicode(fname) + u":" + unicode(e))
+
+    def compile_and_Store(self,X):
+        mod = """
+        #include <math.h>
+        #define X_dim0 $X_dim0
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
+
+        __device__ int max_class(int* preds, int thread_nr){
+            int counts[N_estimators]; //assumes more tree than classes?? how many classes are there?
+            for(int i = 0; i < N_estimators; i++){
+                counts[i] = 0;
+            }
+            for(int i = 0; i < N_estimators; i++){
+                int index = preds[i];
+                counts[index] += 1;
+            }
+            int max_class = 0;
+            int max_count = 0;
+            for(int i = 0; i < N_estimators; i++){
+                if(counts[i] > max_count){
+                    max_count = counts[i];
+                    max_class = i;
+                }
+            }
+            return max_class;
+        }
+
+        __global__ void cuda_query_forest(int *predictions,
+            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* displacements)
+        {
+            register unsigned int i, node_id;
+            i = threadIdx.x + blockDim.x * blockIdx.x;
+
+            int pred_local[N_estimators];
+
+            int X_local[X_dim1];
+            for(int k = 0; k < X_dim1; k++){
+                X_local[k] = Xtest[X_dim1*i+k];
+            }
+
+            for(int j = 0; j < N_estimators; j++){                
+                node_id = 0 + displacements[j];
+                if (i < X_dim0){
+                    while (left_ids[node_id] != 0) {
+                        if (X_local[features[node_id]]<= thres_or_leaf[node_id]) {
+                            node_id = left_ids[node_id] + displacements[j];
+                        } else {
+                            node_id = right_ids[node_id] + displacements[j];
+                        }
+                    }
+                pred_local[j] = round(thres_or_leaf[node_id]);
+                }
+
+            }
+            predictions[i] = max_class(pred_local,i);
+        }
+        """
+        #start_time = time.time()
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim0 = X.shape[0], X_dim1 = X.shape[1], N_estimators = self.n_estimators)
+        module = SourceModule(code)
+        self.global_cuda_pred_forest = module.get_function("cuda_query_forest")
+        self.store_numpy_forest()
+        #end_time = time.time()
+        #print("test time:\t\t%f\n" % (end_time - start_time))
