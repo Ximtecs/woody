@@ -351,17 +351,17 @@ class Wood(object):
     #this function has a cuda kernel were each thread predicts for a single instance on all trees
     def cuda_pred_forest(self,X):
         #print(self.tree_nodes_sum)
-        if X.dtype != np.int32:
-            X = X.astype(np.int32) 
+        if X.dtype != np.float32:
+            X = X.astype(np.float32) 
         preds = np.ones(X.shape[0], dtype=np.int32)
         params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
-        max_threads = 1024 / 4
+        max_threads = 1024 
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         cuda_start = time.time()
         self.global_cuda_pred_forest(drv.Out(preds), drv.In(self.left_ids), drv.In(self.right_ids), drv.In(self.features), drv.In(self.thres_or_leafs),
             drv.In(X), drv.In(self.tree_nodes_sum),drv.In(params),block=(max_threads,1,1), grid=(nr_grids,1))
         cuda_end = time.time()
-        #print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
+        print("cuda time:\t\t%f\n" % (cuda_end - cuda_start))
         #print(preds)
         return preds
 
@@ -711,14 +711,14 @@ class Wood(object):
         }
 
         __global__ void cuda_query_forest(int *predictions,
-            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, int *Xtest, int* displacements,int* params)
+            int* left_ids, int* right_ids, int* features, float* thres_or_leaf, float *Xtest, int* displacements,int* params)
         {
             register unsigned int i, node_id;
             i = threadIdx.x + blockDim.x * blockIdx.x;
             if (i < params[0]){
                 int pred_local[N_estimators];
 
-                int X_local[X_dim1];
+                float X_local[X_dim1];
                 for(int k = 0; k < X_dim1; k++){
                     X_local[k] = Xtest[X_dim1*i+k];
                 }
