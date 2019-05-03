@@ -801,16 +801,16 @@ class Wood(object):
         nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
         self.cuda_pred_allv2(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
         block=(max_threads,1,1),grid=(nr_grids,1,1))
+        drv.Context.synchronize()
         query_end = time.time()
         print("Query time:\t\t\t%f" % (query_end - query_start))
-
         #Majority vote
         major_start = time.time()
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         self.gpu_majority_vote(gpu_preds, gpu_final_preds, gpu_params, block=(max_threads,1,1),grid=(nr_grids,1,1))
+        drv.Context.synchronize()
         major_end = time.time()
         print("vote time:\t\t\t%f" % (major_end - major_start))
-
         #copy GPU to CPU
         trans_start = time.time()
         drv.memcpy_dtoh(preds,gpu_final_preds)
@@ -843,18 +843,19 @@ class Wood(object):
         __global__ void cuda_pred_all(float* preds,
         int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
         {
-            register unsigned int i, j, node_id, X_offset;
+            register unsigned int i, node_id, X_offset, disp, p;
             i = threadIdx.x + blockDim.x * blockIdx.x;
-            X_offset = (i % params[0])*X_dim1;
-            if (i < params[0]*N_estimators)
+            p = params[0];
+            X_offset = (i % p)*X_dim1;
+            if (i < p*N_estimators)
             {
-                j = i / params[0]; //j is the tree we are looking at
-                node_id = displacements[j];
+                disp = displacements[i / p];
+                node_id = disp;
                 while (forest_LRF[node_id*SIZE_ARR] != 0) {
                     if (X[X_offset + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
-                        node_id = forest_LRF[node_id*SIZE_ARR] + displacements[j];
+                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
                     } else {
-                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + displacements[j];
+                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
                     }
                 }
                 preds[i] = thres_or_leaf[node_id];
