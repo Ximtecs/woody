@@ -771,13 +771,13 @@ class Wood(object):
         self.tree_nodes_sum = tree_nodes_sum
 
 
-    def cuda_v2(self, X):
+    def cuda_v2(self, X,X_num):
         if X.dtype != np.float32:
             X = X.astype(np.float) 
         preds = np.ones(X.shape[0], dtype=np.float32)
         params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
         
-        ###Transfer data to GPU
+        ###Transfer data to GPU -------------------------------------------------------------------------------
         trans_start = time.time()
         gpu_X = drv.mem_alloc(X.nbytes)
         gpu_forest_LRF = drv.mem_alloc(self.left_right_feat.nbytes)
@@ -794,30 +794,32 @@ class Wood(object):
         drv.memcpy_htod(gpu_displacement,self.tree_nodes_sum)
         trans_end = time.time()
         print("Transfer time:\t\t\t%f" % (trans_end - trans_start))
-
-        #Begin query data
+        #Begin query data -------------------------------------------------------------------------------
         query_start = time.time()
         max_threads = 1024
+        #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
         nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
-        self.cuda_pred_allv2(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
+
+        self.cuda_pred_base(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
         block=(max_threads,1,1),grid=(nr_grids,1,1))
+        #self.cuda_pred_branch_opp(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
+        #block=(max_threads,1,1),grid=(nr_grids,1,1))
         drv.Context.synchronize()
         query_end = time.time()
         print("Query time:\t\t\t%f" % (query_end - query_start))
-        #Majority vote
+        #Majority vote -------------------------------------------------------------------------------
         major_start = time.time()
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         self.gpu_majority_vote(gpu_preds, gpu_final_preds, gpu_params, block=(max_threads,1,1),grid=(nr_grids,1,1))
         drv.Context.synchronize()
         major_end = time.time()
         print("vote time:\t\t\t%f" % (major_end - major_start))
-        #copy GPU to CPU
+        #copy GPU to CPU -------------------------------------------------------------------------------
         trans_start = time.time()
         drv.memcpy_dtoh(preds,gpu_final_preds)
         trans_end = time.time()
         print("Transfer back time:\t\t%f" % (trans_end - trans_start))
-
-        #cleanup:
+        #cleanup -------------------------------------------------------------------------------
         clean_start = time.time()
 
         drv.DeviceAllocation.free(gpu_X)
@@ -832,41 +834,8 @@ class Wood(object):
         return preds
 
 
-    def compile_store_v2(self,X,nr_classes):
+    def compile_store_v2(self,X,nr_classes, X_num):
         self.store_forestv2()
-
-        mod = """
-        #define X_dim1 $X_dim1
-        #define N_estimators $N_estimators
-        #define nr_classes $nr_classes
-        #define SIZE_ARR 3
-        __global__ void cuda_pred_all(float* preds,
-        int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
-        {
-            register unsigned int i, node_id, X_offset, disp, p;
-            i = threadIdx.x + blockDim.x * blockIdx.x;
-            p = params[0];
-            X_offset = (i % p)*X_dim1;
-            if (i < p*N_estimators)
-            {
-                disp = displacements[i / p];
-                node_id = disp;
-                while (forest_LRF[node_id*SIZE_ARR] != 0) {
-                    if (X[X_offset + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
-                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
-                    } else {
-                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
-                    }
-                }
-                preds[i] = thres_or_leaf[node_id];
-            }
-
-        }
-        """
-        mod = string.Template(mod)
-        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes)
-        module = SourceModule(code)
-        self.cuda_pred_allv2 = module.get_function("cuda_pred_all")
 
         mod = """
         #define X_dim1 $X_dim1
@@ -906,6 +875,88 @@ class Wood(object):
         code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes)
         module = SourceModule(code)
         self.gpu_majority_vote = module.get_function("majority_vote")
+
+        mod = """
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
+        #define nr_classes $nr_classes
+        #define SIZE_ARR 3
+        __global__ void cuda_pred_base(float* preds,
+        int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
+        {
+            register unsigned int i, node_id, X_offset, disp, p;
+            i = threadIdx.x + blockDim.x * blockIdx.x;
+            p = params[0];
+            X_offset = (i % p)*X_dim1;
+            if (i < p*N_estimators)
+            {
+                disp = displacements[i / p];
+                node_id = disp;
+                while (forest_LRF[node_id*SIZE_ARR] != 0) {
+                    if (X[X_offset + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
+                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
+                    } else {
+                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
+                    }
+                }
+                preds[i] = thres_or_leaf[node_id];
+            }
+
+        }
+        """
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes)
+        module = SourceModule(code)
+        self.cuda_pred_base = module.get_function("cuda_pred_base")
+
+        mod = """
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
+        #define nr_classes $nr_classes
+        #define X_num $X_num
+        #define SIZE_ARR 3
+        __global__ void cuda_pred_branch_opp(float* preds,
+        int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
+        {
+            register unsigned int i, node_id, disp, p;
+            i = threadIdx.x + blockDim.x * blockIdx.x;
+            p = params[0];
+            int x_current = 0;
+            if (i*X_num < p*N_estimators)
+            {
+                disp = displacements[(i*X_num) / p];
+                node_id = disp;
+
+                while (x_current < X_num) {
+                    if (X[((i*X_num+x_current) % p)*X_dim1 + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
+                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
+                    } else {
+                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
+                    }
+
+                    if(forest_LRF[node_id*SIZE_ARR] == 0){
+                        if(i*X_num + x_current + 1< p*N_estimators){
+                            preds[i*X_num+x_current] = thres_or_leaf[node_id];
+                            x_current++;
+                            disp = displacements[(i*X_num+x_current) / p];
+                            node_id = disp;                         
+                        }else{
+                            preds[i*X_num+x_current] = thres_or_leaf[node_id];
+                            x_current = X_num;
+                        }
+                    }
+
+                }
+                
+            }
+
+        }
+        """
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes, X_num = X_num)
+        module = SourceModule(code)
+        self.cuda_pred_branch_opp = module.get_function("cuda_pred_branch_opp")
+
 
     def compile_and_Store(self,X,nr_classes):
         mod = """
