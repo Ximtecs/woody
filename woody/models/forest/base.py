@@ -738,10 +738,7 @@ class Wood(object):
               
             raise Exception("Error while loading model from " + unicode(fname) + u":" + unicode(e))
 
-    #Store forest as 2 array
-    #1 float array for the thres_or_leaf values of each index
-    #1 int array containing left_ids, right_ids and features in 2D array
-    #Also return tree_nodes_sum - an array listing the starting point of each tree in the array
+    #Store forest as 1 array with tree_node-like structs
     def store_forestv2(self):
         tree_nodes_counter = np.zeros(self.n_estimators,np.int32)
         tree_nodes_sum = np.zeros(self.n_estimators,np.int32)
@@ -750,7 +747,6 @@ class Wood(object):
             tree_nodes_counter[i] = tree.node_counter
             tree_nodes_sum[i] = np.sum(tree_nodes_counter[:i])
         total_nodes = np.sum(tree_nodes_counter)
-
 
         nodetype_def = node_def = [('left_ids',np.int32),('right_ids',np.int32),('features',np.int32),('thres_or_leaf',np.float32)]
         forest = np.zeros(total_nodes,dtype = nodetype_def)
@@ -797,9 +793,11 @@ class Wood(object):
         query_start = time.time()
         max_threads = 1024
         #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
-        nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
+        #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
+        nr_grids = int(float(X.shape[0])/float(max_threads)+1)
 
-        self.cuda_pred_base(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
+
+        self.global_cuda_pred_forest(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
         block=(max_threads,1,1),grid=(nr_grids,1,1))
         #self.cuda_pred_branch_opp(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
         #block=(max_threads,1,1),grid=(nr_grids,1,1))
@@ -829,6 +827,7 @@ class Wood(object):
 
         clean_end = time.time()
         print("cleanup time:\t\t\t%f" % (clean_end - clean_start))
+
         return preds
 
 
@@ -915,53 +914,52 @@ class Wood(object):
         module = SourceModule(code)
         self.cuda_pred_base = module.get_function("cuda_pred_base")
 
+
         mod = """
+        #include <math.h>
         #define X_dim1 $X_dim1
         #define N_estimators $N_estimators
         #define nr_classes $nr_classes
-        #define X_num $X_num
-        #define SIZE_ARR 3
-        __global__ void cuda_pred_branch_opp(float* preds,
-        int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
+
+        typedef struct TREE_NODE {
+        unsigned int left_id;
+        unsigned int right_id;
+        unsigned int features;
+        float thres_or_leaf;
+        } TREE_NODE;
+
+        __global__ void cuda_query_forest(float* preds, TREE_NODE* forest, float* X, int* displacements, int* params)
         {
-            register unsigned int i, node_id, disp, p;
+            register unsigned int i, node_id, disp, offset, j;
             i = threadIdx.x + blockDim.x * blockIdx.x;
-            p = params[0];
-            int x_current = 0;
-            if (i*X_num < p*N_estimators)
-            {
-                disp = displacements[(i*X_num) / p];
+            offset = i*X_dim1;
+            j = 0;
+            if (i < params[0]){
+                disp = displacements[j];
                 node_id = disp;
-
-                while (x_current < X_num) {
-                    if (X[((i*X_num+x_current) % p)*X_dim1 + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
-                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
+                while(j < N_estimators){
+                    if (X[offset + forest[node_id].features] <= forest[node_id].thres_or_leaf) {
+                        node_id = forest[node_id].left_id + disp;
                     } else {
-                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
+                        node_id = forest[node_id].right_id + disp;
                     }
-
-                    if(forest_LRF[node_id*SIZE_ARR] == 0){
-                        if(i*X_num + x_current + 1< p*N_estimators){
-                            preds[i*X_num+x_current] = thres_or_leaf[node_id];
-                            x_current++;
-                            disp = displacements[(i*X_num+x_current) / p];
-                            node_id = disp;                         
-                        }else{
-                            preds[i*X_num+x_current] = thres_or_leaf[node_id];
-                            x_current = X_num;
-                        }
+                    preds[i+j*params[0]] = forest[node_id].thres_or_leaf;
+                    if (forest[node_id].left_id == 0){
+                        j++;
+                        disp = displacements[j];
+                        node_id = disp;
                     }
-
                 }
                 
             }
-
         }
         """
+        #start_time = time.time()
         mod = string.Template(mod)
-        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes, X_num = X_num)
+        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators, nr_classes = nr_classes)
         module = SourceModule(code)
-        self.cuda_pred_branch_opp = module.get_function("cuda_pred_branch_opp")
+        self.global_cuda_pred_forest = module.get_function("cuda_query_forest")
+
 
 
     def compile_and_Store(self,X,nr_classes):
