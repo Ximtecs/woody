@@ -751,8 +751,10 @@ class Wood(object):
             tree_nodes_sum[i] = np.sum(tree_nodes_counter[:i])
         total_nodes = np.sum(tree_nodes_counter)
 
-        left_right_feat = np.zeros((total_nodes,3),dtype=np.int32)
-        thres_or_leaf = np.ones(total_nodes, dtype=np.float32)
+
+        nodetype_def = node_def = [('left_ids',np.int32),('right_ids',np.int32),('features',np.int32),('thres_or_leaf',np.float32)]
+        forest = np.zeros(total_nodes,dtype = nodetype_def)
+
         tree = self.wrapper.module.TREE()
         node = self.wrapper.module.TREE_NODE()
         index = 0 
@@ -762,12 +764,11 @@ class Wood(object):
             for j in xrange (tree_nodes_counter[i]):
                 index = displacement+j
                 self.wrapper.module.get_tree_node_extern(tree, j, node)
-                left_right_feat[index][0] = node.left_id
-                left_right_feat[index][1] = node.right_id
-                left_right_feat[index][2] = node.feature
-                thres_or_leaf[index] = node.thres_or_leaf
-        self.left_right_feat = left_right_feat
-        self.thres_or_leafs = thres_or_leaf
+                forest[index]['left_ids'] = node.left_id
+                forest[index]['right_ids'] = node.right_id
+                forest[index]['features'] = node.feature
+                forest[index]['thres_or_leaf'] = node.thres_or_leaf
+        self.forest = forest
         self.tree_nodes_sum = tree_nodes_sum
 
 
@@ -780,16 +781,14 @@ class Wood(object):
         ###Transfer data to GPU -------------------------------------------------------------------------------
         trans_start = time.time()
         gpu_X = drv.mem_alloc(X.nbytes)
-        gpu_forest_LRF = drv.mem_alloc(self.left_right_feat.nbytes)
-        gpu_forest_thres = drv.mem_alloc(self.thres_or_leafs.nbytes)
+        gpu_forest = drv.mem_alloc(self.forest.nbytes)
         gpu_params = drv.mem_alloc(params.nbytes)
         gpu_displacement = drv.mem_alloc(self.tree_nodes_sum.nbytes)
         gpu_preds = drv.mem_alloc(preds.nbytes * self.n_estimators)
         gpu_final_preds = drv.mem_alloc(preds.nbytes)
-
+    
         drv.memcpy_htod(gpu_X,X)
-        drv.memcpy_htod(gpu_forest_LRF,self.left_right_feat)
-        drv.memcpy_htod(gpu_forest_thres,self.thres_or_leafs)
+        drv.memcpy_htod(gpu_forest,self.forest)
         drv.memcpy_htod(gpu_params, params)
         drv.memcpy_htod(gpu_displacement,self.tree_nodes_sum)
         trans_end = time.time()
@@ -800,7 +799,7 @@ class Wood(object):
         #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
         nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
 
-        self.cuda_pred_base(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
+        self.cuda_pred_base(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
         block=(max_threads,1,1),grid=(nr_grids,1,1))
         #self.cuda_pred_branch_opp(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
         #block=(max_threads,1,1),grid=(nr_grids,1,1))
@@ -823,8 +822,7 @@ class Wood(object):
         clean_start = time.time()
 
         drv.DeviceAllocation.free(gpu_X)
-        drv.DeviceAllocation.free(gpu_forest_LRF)
-        drv.DeviceAllocation.free(gpu_forest_thres)
+        drv.DeviceAllocation.free(gpu_forest)
         drv.DeviceAllocation.free(gpu_params)
         drv.DeviceAllocation.free(gpu_displacement)
         drv.DeviceAllocation.free(gpu_final_preds)
@@ -881,8 +879,16 @@ class Wood(object):
         #define N_estimators $N_estimators
         #define nr_classes $nr_classes
         #define SIZE_ARR 3
+
+        typedef struct TREE_NODE {
+        unsigned int left_id;
+        unsigned int right_id;
+        unsigned int features;
+        float thres_or_leaf;
+        } TREE_NODE;
+
         __global__ void cuda_pred_base(float* preds,
-        int* forest_LRF, float* thres_or_leaf, float* X, int* displacements, int* params)
+        TREE_NODE* forest, float* X, int* displacements, int* params)
         {
             register unsigned int i, node_id, X_offset, disp, p;
             i = threadIdx.x + blockDim.x * blockIdx.x;
@@ -892,14 +898,14 @@ class Wood(object):
             {
                 disp = displacements[i / p];
                 node_id = disp;
-                while (forest_LRF[node_id*SIZE_ARR] != 0) {
-                    if (X[X_offset + forest_LRF[node_id*SIZE_ARR + 2]]<= thres_or_leaf[node_id]) {
-                        node_id = forest_LRF[node_id*SIZE_ARR] + disp;
+                while (forest[node_id].left_id != 0) {
+                    if (X[X_offset + forest[node_id].features] <= forest[node_id].thres_or_leaf) {
+                        node_id = forest[node_id].left_id + disp;
                     } else {
-                        node_id = forest_LRF[node_id*SIZE_ARR + 1] + disp;
+                        node_id = forest[node_id].right_id + disp;
                     }
                 }
-                preds[i] = thres_or_leaf[node_id];
+                preds[i] = forest[node_id].thres_or_leaf;
             }
 
         }
