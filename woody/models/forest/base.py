@@ -772,7 +772,7 @@ class Wood(object):
         if X.dtype != np.float32:
             X = X.astype(np.float) 
         preds = np.ones(X.shape[0], dtype=np.float32)
-        params = np.array([X.shape[0],X.shape[1],self.n_estimators], dtype=np.int32)
+        params = np.array([X.shape[0],X.shape[1],X_num], dtype=np.int32)
         
         ###Transfer data to GPU -------------------------------------------------------------------------------
         trans_start = time.time()
@@ -787,20 +787,25 @@ class Wood(object):
         drv.memcpy_htod(gpu_forest,self.forest)
         drv.memcpy_htod(gpu_params, params)
         drv.memcpy_htod(gpu_displacement,self.tree_nodes_sum)
+        drv.Context.synchronize()
         trans_end = time.time()
         print("Transfer time:\t\t\t%f" % (trans_end - trans_start))
         #Begin query data -------------------------------------------------------------------------------
         query_start = time.time()
-        max_threads = 1024
-        #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
+        max_threads = 1024 / 16
+        
         #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
-        nr_grids = int(float(X.shape[0])/float(max_threads)+1)
-
-
-        self.global_cuda_pred_forest(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
-        block=(max_threads,1,1),grid=(nr_grids,1,1))
-        #self.cuda_pred_branch_opp(gpu_preds, gpu_forest_LRF, gpu_forest_thres, gpu_X, gpu_displacement, gpu_params,
+        #self.cuda_pred_base(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
         #block=(max_threads,1,1),grid=(nr_grids,1,1))
+
+        #nr_grids = int(float(X.shape[0])/float(max_threads)+1)
+        #self.branch_pred_forest(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
+        #block=(max_threads,1,1),grid=(nr_grids,1,1))
+
+        nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
+        self.branch_multX(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
+        block=(max_threads,1,1),grid=(nr_grids,1,1))
+
         drv.Context.synchronize()
         query_end = time.time()
         print("Query time:\t\t\t%f" % (query_end - query_start))
@@ -827,7 +832,7 @@ class Wood(object):
 
         clean_end = time.time()
         print("cleanup time:\t\t\t%f" % (clean_end - clean_start))
-
+            
         return preds
 
 
@@ -838,7 +843,6 @@ class Wood(object):
         #define X_dim1 $X_dim1
         #define N_estimators $N_estimators
         #define nr_classes $nr_classes
-        #define SIZE_ARR 3
         __global__ void majority_vote(float* all_preds, float* final_preds,int* params)
         {
             register unsigned int i, dim0, max_val, max_index;
@@ -877,7 +881,6 @@ class Wood(object):
         #define X_dim1 $X_dim1
         #define N_estimators $N_estimators
         #define nr_classes $nr_classes
-        #define SIZE_ARR 3
 
         typedef struct TREE_NODE {
         unsigned int left_id;
@@ -886,8 +889,7 @@ class Wood(object):
         float thres_or_leaf;
         } TREE_NODE;
 
-        __global__ void cuda_pred_base(float* preds,
-        TREE_NODE* forest, float* X, int* displacements, int* params)
+        __global__ void cuda_pred_base(float* preds,TREE_NODE* forest, float* X, int* displacements, int* params)
         {
             register unsigned int i, node_id, X_offset, disp, p;
             i = threadIdx.x + blockDim.x * blockIdx.x;
@@ -914,7 +916,6 @@ class Wood(object):
         module = SourceModule(code)
         self.cuda_pred_base = module.get_function("cuda_pred_base")
 
-
         mod = """
         #include <math.h>
         #define X_dim1 $X_dim1
@@ -930,8 +931,8 @@ class Wood(object):
 
         __global__ void cuda_query_forest(float* preds, TREE_NODE* forest, float* X, int* displacements, int* params)
         {
-            register unsigned int i, node_id, disp, offset, j;
-            i = threadIdx.x + blockDim.x * blockIdx.x;
+            register unsigned  node_id, disp, offset, j;
+            int i = threadIdx.x + blockDim.x * blockIdx.x;
             offset = i*X_dim1;
             j = 0;
             if (i < params[0]){
@@ -943,14 +944,13 @@ class Wood(object):
                     } else {
                         node_id = forest[node_id].right_id + disp;
                     }
-                    preds[i+j*params[0]] = forest[node_id].thres_or_leaf;
                     if (forest[node_id].left_id == 0){
+                        preds[i+j*params[0]] = forest[node_id].thres_or_leaf;
                         j++;
                         disp = displacements[j];
                         node_id = disp;
                     }
                 }
-                
             }
         }
         """
@@ -958,11 +958,62 @@ class Wood(object):
         mod = string.Template(mod)
         code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators, nr_classes = nr_classes)
         module = SourceModule(code)
-        self.global_cuda_pred_forest = module.get_function("cuda_query_forest")
+        self.branch_pred_forest = module.get_function("cuda_query_forest")
 
+        mod = """
+        #define X_dim1 $X_dim1
+        #define N_estimators $N_estimators
+        #define nr_classes $nr_classes
+        #define SIZE_ARR 3
 
+        typedef struct TREE_NODE {
+        unsigned int left_id;
+        unsigned int right_id;
+        unsigned int features;
+        float thres_or_leaf;
+        } TREE_NODE;
+
+        __global__ void branch_multX(float* preds,
+        TREE_NODE* forest, float* X, int* displacements, int* params)
+        {
+            register unsigned node_id, offset, disp, p, k;
+            int i = threadIdx.x + blockDim.x * blockIdx.x;
+            p = params[0];
+            k = 0;
+            offset = ((i*params[2]) % p)*X_dim1;
+            if (i * params[2] < p*N_estimators)
+            {
+                disp = displacements[(i*params[2]+k)/p];
+                node_id = disp;
+                while ( k < params[2]){
+                    if (X[offset + forest[node_id].features]<= forest[node_id].thres_or_leaf) {
+                        node_id = forest[node_id].left_id + disp;
+                    } else {
+                        node_id = forest[node_id].right_id + disp;
+                    }
+                    if ( forest[node_id].left_id == 0 ){
+                        preds[i*params[2]+k] = forest[node_id].thres_or_leaf;
+                        k++;
+                        if ( i * params[2] + k < p*N_estimators ){
+                            disp = displacements[(i*params[2]+k)/p];
+                            node_id = disp;
+                            offset = ((i*params[2] + k) % p)*X_dim1;
+                        }else{
+                            k = params[2];
+                        }
+                    }
+                }
+            }
+
+        }
+        """
+        mod = string.Template(mod)
+        code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes)
+        module = SourceModule(code)
+        self.branch_multX = module.get_function("branch_multX")
 
     def compile_and_Store(self,X,nr_classes):
+        #self.store_forestv2()
         mod = """
         #include <math.h>
         #define X_dim1 $X_dim1
@@ -1285,9 +1336,6 @@ class Wood(object):
                         }
                         predictions[i*params[2]+k] = thres_or_leaf[node_id];
                     }
-
-
-
                 }
             }
         """
