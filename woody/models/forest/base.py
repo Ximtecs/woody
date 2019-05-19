@@ -768,42 +768,6 @@ class Wood(object):
         self.tree_nodes_sum = tree_nodes_sum
 
 
-    def get_small_tree(self, arr,h,node_id,new_id):
-        if(h>0):
-            node = self.forest[node_id]
-            print(node)
-            node['left_ids'] = new_id + 1
-            node['right_ids'] = new_id + 2
-            arr.append(node)
-
-            if(self.forest[node_id]['left_ids'] != 0):
-                self.get_small_tree(arr,h-1,self.forest[node_id]['left_ids'],new_id+2)
-                self.get_small_tree(arr,h-1,self.forest[node_id]['right_ids'],new_id+4)
-        if(h==0):
-            node = self.forest[node_id]
-            print(node)
-            node['left_ids'] = new_id + 1
-            node['right_ids'] = new_id + 2
-            arr.append(node)
-
-    def rearrange_tree(self,arr,h,node_id):
-        size = 2**(h+1)-1
-        queue = []
-        queue.append(node_id)
-        done_queue = []
-        while(len(done_queue) < size):
-            temp_id = queue.pop(0)
-            done_queue.append(self.forest[temp_id])
-
-            if(self.forest[temp_id]['left_ids'] != 0):
-                queue.append(self.forest[temp_id]['left_ids'])
-            if(self.forest[temp_id]['right_ids'] != 0 ):
-                queue.append(self.forest[temp_id]['right_ids'])
-            if (self.forest[temp_id]['left_ids'] == self.forest[temp_id]['right_ids']):
-                break
-        arr.extend(done_queue)
-
-
     def cuda_v2(self, X,X_num, pred_type):
         if X.dtype != np.float32:
             X = X.astype(np.float) 
