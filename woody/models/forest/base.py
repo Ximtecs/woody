@@ -768,7 +768,43 @@ class Wood(object):
         self.tree_nodes_sum = tree_nodes_sum
 
 
-    def cuda_v2(self, X,X_num):
+    def get_small_tree(self, arr,h,node_id,new_id):
+        if(h>0):
+            node = self.forest[node_id]
+            print(node)
+            node['left_ids'] = new_id + 1
+            node['right_ids'] = new_id + 2
+            arr.append(node)
+
+            if(self.forest[node_id]['left_ids'] != 0):
+                self.get_small_tree(arr,h-1,self.forest[node_id]['left_ids'],new_id+2)
+                self.get_small_tree(arr,h-1,self.forest[node_id]['right_ids'],new_id+4)
+        if(h==0):
+            node = self.forest[node_id]
+            print(node)
+            node['left_ids'] = new_id + 1
+            node['right_ids'] = new_id + 2
+            arr.append(node)
+
+    def rearrange_tree(self,arr,h,node_id):
+        size = 2**(h+1)-1
+        queue = []
+        queue.append(node_id)
+        done_queue = []
+        while(len(done_queue) < size):
+            temp_id = queue.pop(0)
+            done_queue.append(self.forest[temp_id])
+
+            if(self.forest[temp_id]['left_ids'] != 0):
+                queue.append(self.forest[temp_id]['left_ids'])
+            if(self.forest[temp_id]['right_ids'] != 0 ):
+                queue.append(self.forest[temp_id]['right_ids'])
+            if (self.forest[temp_id]['left_ids'] == self.forest[temp_id]['right_ids']):
+                break
+        arr.extend(done_queue)
+
+
+    def cuda_v2(self, X,X_num, pred_type):
         if X.dtype != np.float32:
             X = X.astype(np.float) 
         preds = np.ones(X.shape[0], dtype=np.float32)
@@ -777,63 +813,76 @@ class Wood(object):
         ###Transfer data to GPU -------------------------------------------------------------------------------
         trans_start = time.time()
         gpu_X = drv.mem_alloc(X.nbytes)
-        gpu_forest = drv.mem_alloc(self.forest.nbytes)
+        #gpu_forest = drv.mem_alloc(self.forest.nbytes)
         gpu_params = drv.mem_alloc(params.nbytes)
-        gpu_displacement = drv.mem_alloc(self.tree_nodes_sum.nbytes)
+        #gpu_displacement = drv.mem_alloc(self.tree_nodes_sum.nbytes)
         gpu_preds = drv.mem_alloc(preds.nbytes * self.n_estimators)
         gpu_final_preds = drv.mem_alloc(preds.nbytes)
+
+        #print("data takes up %i bytes" % (X.nbytes))
+        #print("all_preds takes up %i bytes" % (preds.nbytes * self.n_estimators))
+        #print("final_preds takes up %i bytes" % (self.forest.nbytes))
     
         drv.memcpy_htod(gpu_X,X)
-        drv.memcpy_htod(gpu_forest,self.forest)
+        #drv.memcpy_htod(gpu_forest,self.forest)
         drv.memcpy_htod(gpu_params, params)
-        drv.memcpy_htod(gpu_displacement,self.tree_nodes_sum)
+        #drv.memcpy_htod(gpu_displacement,self.tree_nodes_sum)
         drv.Context.synchronize()
         trans_end = time.time()
-        print("Transfer time:\t\t\t%f" % (trans_end - trans_start))
+        transfer_time = trans_end - trans_start
+        #print("Transfer time:\t\t\t%f" % (transfer_time))
         #Begin query data -------------------------------------------------------------------------------
         query_start = time.time()
         max_threads = 1024 / 16
         
-        #nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
-        #self.cuda_pred_base(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
-        #block=(max_threads,1,1),grid=(nr_grids,1,1))
+        if (pred_type == 0):
+            nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads)+1)
+            self.cuda_pred_base(gpu_preds, self.gpu_forest, gpu_X, self.gpu_displacement, gpu_params,
+            block=(max_threads,1,1),grid=(nr_grids,1,1))
 
-        #nr_grids = int(float(X.shape[0])/float(max_threads)+1)
-        #self.branch_pred_forest(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
-        #block=(max_threads,1,1),grid=(nr_grids,1,1))
+        elif (pred_type == 1):
+            nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
+            self.branch_multX(gpu_preds, self.gpu_forest, gpu_X, self.gpu_displacement, gpu_params,
+            block=(max_threads,1,1),grid=(nr_grids,1,1))
+        else:
+            nr_grids = int(float(X.shape[0])/float(max_threads)+1)
+            self.branch_pred_forest(gpu_preds, self.gpu_forest, gpu_X, self.gpu_displacement, gpu_params,
+            block=(max_threads,1,1),grid=(nr_grids,1,1))          
 
-        nr_grids = int(float(X.shape[0]*self.n_estimators)/float(max_threads*X_num)+1)
-        self.branch_multX(gpu_preds, gpu_forest, gpu_X, gpu_displacement, gpu_params,
-        block=(max_threads,1,1),grid=(nr_grids,1,1))
 
         drv.Context.synchronize()
         query_end = time.time()
-        print("Query time:\t\t\t%f" % (query_end - query_start))
+        query_time = query_end - query_start
+        #print("Query time:\t\t\t%f" % (query_time))
         #Majority vote -------------------------------------------------------------------------------
         major_start = time.time()
         nr_grids = int(float(X.shape[0])/float(max_threads)+1)
         self.gpu_majority_vote(gpu_preds, gpu_final_preds, gpu_params, block=(max_threads,1,1),grid=(nr_grids,1,1))
         drv.Context.synchronize()
         major_end = time.time()
-        print("vote time:\t\t\t%f" % (major_end - major_start))
+        major_time = major_end - major_start
+        #print("vote time:\t\t\t%f" % (major_time))
         #copy GPU to CPU -------------------------------------------------------------------------------
         trans_start = time.time()
         drv.memcpy_dtoh(preds,gpu_final_preds)
         trans_end = time.time()
-        print("Transfer back time:\t\t%f" % (trans_end - trans_start))
+        transfer_back_time = trans_end - trans_start
+        #print("Transfer back time:\t\t%f" % (transfer_back_time))
         #cleanup -------------------------------------------------------------------------------
         clean_start = time.time()
 
         drv.DeviceAllocation.free(gpu_X)
-        drv.DeviceAllocation.free(gpu_forest)
+        #drv.DeviceAllocation.free(self.gpu_forest)
         drv.DeviceAllocation.free(gpu_params)
-        drv.DeviceAllocation.free(gpu_displacement)
+        #drv.DeviceAllocation.free(self.gpu_displacement)
         drv.DeviceAllocation.free(gpu_final_preds)
 
         clean_end = time.time()
-        print("cleanup time:\t\t\t%f" % (clean_end - clean_start))
+        clean_time = clean_end - clean_start
+        #print("cleanup time:\t\t\t%f" % (clean_time))
             
-        return preds
+        return preds, transfer_time, query_time, major_time, transfer_back_time, clean_time
+
 
 
     def compile_store_v2(self,X,nr_classes, X_num):
@@ -1011,6 +1060,16 @@ class Wood(object):
         code = mod.substitute(X_dim1 = X.shape[1], N_estimators = self.n_estimators,nr_classes = nr_classes)
         module = SourceModule(code)
         self.branch_multX = module.get_function("branch_multX")
+
+        self.gpu_forest = drv.mem_alloc(self.forest.nbytes)
+        self.gpu_displacement = drv.mem_alloc(self.tree_nodes_sum.nbytes)
+        print("forest takes up %i bytes" % (self.forest.nbytes))
+
+        drv.memcpy_htod(self.gpu_forest,self.forest)
+        drv.memcpy_htod(self.gpu_displacement,self.tree_nodes_sum)
+
+
+        
 
     def compile_and_Store(self,X,nr_classes):
         #self.store_forestv2()
