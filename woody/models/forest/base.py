@@ -768,42 +768,6 @@ class Wood(object):
         self.tree_nodes_sum = tree_nodes_sum
 
 
-    def get_small_tree(self, arr,h,node_id,new_id):
-        if(h>0):
-            node = self.forest[node_id]
-            print(node)
-            node['left_ids'] = new_id + 1
-            node['right_ids'] = new_id + 2
-            arr.append(node)
-
-            if(self.forest[node_id]['left_ids'] != 0):
-                self.get_small_tree(arr,h-1,self.forest[node_id]['left_ids'],new_id+2)
-                self.get_small_tree(arr,h-1,self.forest[node_id]['right_ids'],new_id+4)
-        if(h==0):
-            node = self.forest[node_id]
-            print(node)
-            node['left_ids'] = new_id + 1
-            node['right_ids'] = new_id + 2
-            arr.append(node)
-
-    def rearrange_tree(self,arr,h,node_id):
-        size = 2**(h+1)-1
-        queue = []
-        queue.append(node_id)
-        done_queue = []
-        while(len(done_queue) < size):
-            temp_id = queue.pop(0)
-            done_queue.append(self.forest[temp_id])
-
-            if(self.forest[temp_id]['left_ids'] != 0):
-                queue.append(self.forest[temp_id]['left_ids'])
-            if(self.forest[temp_id]['right_ids'] != 0 ):
-                queue.append(self.forest[temp_id]['right_ids'])
-            if (self.forest[temp_id]['left_ids'] == self.forest[temp_id]['right_ids']):
-                break
-        arr.extend(done_queue)
-
-
     def cuda_v2(self, X,X_num, pred_type):
         if X.dtype != np.float32:
             X = X.astype(np.float) 
@@ -1249,30 +1213,18 @@ class Wood(object):
         mod = """
         #define X_dim1 $X_dim1
         #define N_estimators $N_estimators
-        #define nr_classes $nr_classes
-        __device__ int find_j(int i, int dim0){
-            int j = 0;
-            while (j < N_estimators){
-                if (i < (j+1) * dim0){
-                    return j;
-                } else{
-                    j++;
-                }
-            }
-            return j;
-        }
-
         __global__ void cuda_pred_allf(float *predictions, 
             int* left_ids, int* right_ids, int* features, float* thres_or_leaf, float *Xtest, int* displacements,int* params)
             {
-                register unsigned int i, j, node_id;
+                register unsigned int i, j, node_id, offset;
                 i = threadIdx.x + blockDim.x * blockIdx.x;
+                offset = (i % params[0])*X_dim1;
                 if (i < params[0]*N_estimators)
                 {
-                    j = find_j(i, params[0]);
+                    j = i / params[0];
                     node_id = displacements[j];
                     while (left_ids[node_id] != 0) {
-                        if (Xtest[(i % params[0])*X_dim1 + features[node_id]]<= thres_or_leaf[node_id]) {
+                        if (Xtest[offset + features[node_id]]<= thres_or_leaf[node_id]) {
                             node_id = left_ids[node_id] + displacements[j];
                         } else {
                             node_id = right_ids[node_id] + displacements[j];
@@ -1320,15 +1272,11 @@ class Wood(object):
             int* left_ids, int* right_ids, int* features, float* thres_or_leaf, float *Xtest, int* displacements,int* params)
             {
                 __shared__ float X_local[X_dim1];
-                __shared__ int i;
                 __shared__ int pred_local[N_estimators];
-                register unsigned j, node_id, disp;
+                register unsigned i, j, node_id, disp;
                 j = threadIdx.x; 
-                if( j == 0){
-                        i =  blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
+                i =  blockIdx.x + blockIdx.y * gridDim.x + gridDim.x * gridDim.y * blockIdx.z;
 
-                    }
-                __syncthreads();
                 disp = displacements[j];
                 if ( i < params[0]){
                     if( j == 0){
@@ -1336,7 +1284,6 @@ class Wood(object):
                             X_local[k] = Xtest[i*X_dim1+k];
                         }
                     }
-                    __syncthreads();
                     node_id = disp;
                     while (left_ids[node_id] != 0){
                         if (X_local[features[node_id]] <= thres_or_leaf[node_id]){
@@ -1348,7 +1295,6 @@ class Wood(object):
                     pred_local[j] = round(thres_or_leaf[node_id]);
                    
                 }
-                __syncthreads();
                 if(j == 0){
                     predictions[i] = max_class(pred_local,i);
                 }
