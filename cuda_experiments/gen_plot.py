@@ -30,7 +30,7 @@ plt.plot(sizes,results[:,3],label='Vote time',linestyle="-",color='r',linewidth=
 plt.plot(sizes,results[:,4],label='Transfer back time',linestyle=":",color='r',linewidth=5.0)
 plt.plot(sizes,results[:,5],label='Cleanup time',linestyle="-.",color='r',linewidth=5.0)
 plt.plot(sizes,results[:,6],label='Sum time',linestyle=":",color='k',linewidth=5.0)
-if (sys.argv[2] == 1):
+if (sys.argv[2] == "1"):
 	plt.plot(sizes,results[:,7],label='CPU',linewidth=5.0,color='b') #Comment out if you only want to see GPU time
 plt.legend(loc='best')
 
