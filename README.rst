@@ -37,13 +37,30 @@ To run all the experiments, you also need to manually install::
   cd skutil
   python setup.py install
 
-Experiments
+Woody Experiments
 -----------
 
 To run the experiments, simply run the launch.py file in the corresponding subdirectory. The associated run files will automatically download the datasets needed (in case this phase is interrupted, please delete the incomplete data files in the corresponding directory under woody/data). For instance::
 
   cd experiments/small_data
   python launch.py 
+
+PyCUDA Experiments
+-----------
+
+To run the PyCuda experiments you first have to generate models.
+This is done by running "gen_forest.sh" which will generate forest using both covtype and susy data.
+This is located the the "cuda_experiments" folder.
+Next, run "genall.sh" which will make runtime measurements for each forest size.
+Lastly, run "gel_all_plots.sh" to generate the figures.
+If you want the early implementations result, copy the models to the "cuda_experements/v1&v2/".
+Here you will also find scripts for generating runtime measurements and plots.s
+Example of executions is shown below:
+
+  ./gen_forest.sh (Will probably take hours to run)
+  ./genall.sh (Will taken between 10-30min)
+  ./gen_all_plots.sh
+
 
 Disclaimer
 ----------
