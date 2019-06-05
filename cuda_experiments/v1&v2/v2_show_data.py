@@ -15,11 +15,11 @@ results = np.array(pickle.load(open(file_name,'rb')))
 covtype_size = [100000, 150000, 200000, 250000, 300000, 350000, 400000]
 covtype_size = [float(i) / 100000. for i in covtype_size]
 plt.figure(1)
-plt.plot(covtype_size,results[:,0],label='CPU 4job',linestyle="-",color='k',linewidth=5.0)
-plt.plot(covtype_size,results[:,1],label='cuda_base',linestyle="--",color='k',linewidth=5.0)
+plt.plot(covtype_size,results[:,0],label='CPU 4threads',linestyle="-",color='k',linewidth=5.0)
+plt.plot(covtype_size,results[:,1],label='cuda_all',linestyle="--",color='k',linewidth=5.0)
 plt.plot(covtype_size,results[:,2],label='cuda_mult',linestyle="-.",color='k',linewidth=5.0)
 plt.plot(covtype_size,results[:,3],label='cuda_forest',linestyle=":",color='k',linewidth=5.0)
-plt.plot(covtype_size,results[:,4],label='CPU 1job',linestyle="-",color='r',linewidth=5.0)
+plt.plot(covtype_size,results[:,4],label='CPU 1thread',linestyle="-",color='r',linewidth=5.0)
 plt.legend(loc='best')
 
 plt.ylabel('time [ s ]',fontsize=20)
